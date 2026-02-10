@@ -1,0 +1,381 @@
+---
+title: "24.11.28_Evaluación Mod 14_Sanidad"
+author: "Cristóbal León-Salas"
+date: "2024-11-28"
+output:
+   html_document:
+    theme: cerulean
+    highlight: kate
+    fig_width: 8
+    fig_height: 5
+    fig_caption: true
+    code_folding: show
+    number_sections: true
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = -1) #Para eliminar los mensajes Warnings del KML generado
+
+```
+
+## CARGA DE LIBRERIAS
+
+```{r 0.1. Carga de librerias}
+
+#Se cargan todas las librerias que van a ser usadas durante el ejercicio:
+
+suppressPackageStartupMessages({
+  library(caret) #librería de entrenamiento y evaluación de clasificadores
+  library(nnet) #librería de entrenamiento y evaluación de clasificadores. Útil para entrenar redes neuronales simples
+  library(readr) #Para leer archivos
+  library(openxlsx) #Para exportar una tabla en .xlsx
+  library(kableExtra) #Para crear tablas
+  library(dplyr) #Para el manejo de Dataframes
+  library(knitr)
+          })
+
+```
+
+## FUNCIONES
+
+### Función Resample
+
+```{r 0.2. Función Resample}
+
+resample = function(MD)
+{
+newMD=matrix(1,nrow=nrow(MD),ncol=60)
+for (i in 1:nrow(MD))
+{
+for (j in 1:60)
+{
+newMD[i,j]=mean(MD[i,(((j-1)*16)+1):(j*16)])
+}
+}
+return(newMD)
+}
+
+```
+
+### Función Estandarizar
+
+```{r 0.3. Función Estandarizar}
+
+estandarizar = function(train, Mdata)
+{
+Mstd=matrix(1,nrow=nrow(Mdata),ncol=ncol(Mdata))
+Mmeans<-colMeans(train)
+Msds<-apply(train, MARGIN=2, FUN=sd)
+for (i in 1:ncol(train)){
+Mstd[,i]<-(Mdata[,i]-Mmeans[i])/Msds[i]
+}
+return (Mstd)
+}
+
+```
+
+### Función Optimización
+
+```{r 0.4. Función Optimización}
+
+optimizacion = function(Mtrain, Ytrain, Mval, Yval, Nhidden, decay, repetitions) {
+
+  # Matriz de resultados
+  matriz_op <- matrix(numeric(length(decay) * length(Nhidden)), nrow = length(decay))
+  rownames(matriz_op) <- paste("decay =", decay)
+  colnames(matriz_op) <- paste("Num_capas =", Nhidden)
+ 
+  for (i in 1:length(decay)) {
+    for (j in 1:length(Nhidden)) {
+     Met_entr <- numeric(repetitions)
+      for (k in 1:repetitions) {
+        
+        # Entrenamiento con nnet()
+        modelo <- nnet(
+          Mtrain, Ytrain,     # Matrices de dato de entrenamiento
+          size = Nhidden[j],  # Número de neuronas en la capa oculta
+          decay = decay[i],   # Parámetro de regularización
+          maxit = 500,        # Iteraciones máximas
+          trace = FALSE,      # Desactiva los mensajes en consola
+          MaxNWts = 10000     # Número máximo de pesos
+        )
+        
+        # Predicción sobre los datos de validación
+        pred <- predict(modelo, Mval)
+        pred = round(pred)
+        
+        # Matriz de confusión
+        matriz_confusion <- table(Real = Yval, Predicho = pred)
+        
+        # Calcular accuracy
+        accuracy <- sum(diag(matriz_confusion)) / sum(matriz_confusion)
+        
+        # Almacenar la métrica de rendimiento
+        Met_entr[k] <- accuracy
+      }
+      
+      # Asignar promedio de rendimiento a la matriz
+      matriz_op[i, j] <- mean(Met_entr)
+    }
+  }
+  
+  return(matriz_op)
+}
+
+```
+
+### Función TRAIN-TEST
+
+```{r 0.5. Función TRAIN-TEST}
+
+train_test = function(Mtrain,Ytrain,Mtest,Ytest,Nhidden_opt,decay_opt)
+{
+
+    # Entrenamiento con nnet()
+          modelo <- nnet(
+          Mtrain, Ytrain,     # Matrices de dato de entrenamiento
+          size = Nhidden_opt,  # Número de neuronas que máximiza el accuracy
+          decay = decay_opt,   # Parámetro de regularización
+          maxit = 500,        # Iteraciones máximas
+          trace = FALSE,      # Desactiva los mensajes en consola
+          MaxNWts = 10000     # Número máximo de pesos
+        )
+        
+        # Predicción sobre los datos de test
+        pred <- predict(modelo, Mtest)
+        pred = round(pred)
+        
+        # Matriz de confusión
+        matriz_confusion <- table(Real = Ytest, Predicho = pred)
+        
+       return(matriz_confusion)
+}
+
+```
+
+
+# LECTURA DE FICHEROS Y CONSTRUCCIÓN DE VARIABLES
+
+## Cargar y analizar la base de datos
+
+```{r 1.Cargar y analizar la base de datos}
+
+raw_data <- "Y:/05. Formación/02_Master de Big Data/04_CURSO/05_EXÁMENES/03_EVALUACIONES 2024/14_Módulo 14/02_Sanidad/02_Raw Data/SpO2seg.csv"
+df_orig <- read.csv(raw_data, sep=";", header=FALSE)
+
+# Exporto un resumen de los datos del dataframe:
+str(df_orig)
+
+# Se observa que cuento con 4208 segmentos, con 961 variables cada uno. Compruebo si todas las variables son de tipo entero:
+
+sum(sapply(df_orig, is.integer))
+
+# Como el resultado son 961, se puede concluir que todas las variables son enteras.
+
+# Se separan los datos de la muestra con los de la variable "target", de modo que:
+
+df_target = data.matrix(df_orig[, ncol(df_orig)])
+
+df_orig [,ncol(df_orig)] = NULL
+
+df_orig = data.matrix(df_orig)
+
+```
+
+# PREPROCESADO
+
+## Preprocesado de los datos. Resampling.
+
+```{r 2.Preprocesado de los datos. Resampling}
+
+# Convierto las medidas de la matriz df_orig a 1 Hz, por lo que tendré ahora 60 variables (columnas)
+
+df_orig_resample = resample (df_orig)
+
+```
+
+# CONJUNTOS DE DATOS
+
+## Creación de los conjuntos de entrenamiento, validación y test
+
+Tengo que sacar conjuntos de datos totales. 3 conjuntos (train, valid, test) para la matriz de datos df_orig y 3 para df_traget
+
+```{r 3. Creación de los conjuntos de entrenamiento, validación y test}
+
+set.seed(123)  # Fijar la semilla para reproducibilidad
+
+# Obtengo los índices del subconjunto de los datos de entrenamiento:
+
+index_train <- sample(nrow(df_orig_resample), round(0.50*nrow(df_orig_resample)))
+length (index_train)
+
+# Se comprueba que se han cogido la mitad de las instancias
+
+# Aora saco en función de los indices anteriores los conjuntos de datos de las matrices de datos df_orig_resample y df_target
+df_orig_train <- df_orig_resample[index_train, ]
+df_target_train <- df_target[index_train]
+
+# Saco el resto de índices que no han sido seleccionados para el entrenamiento:
+index_remaining <- setdiff(1:nrow(df_orig_resample), index_train) 
+
+# Dividir el vector index_remaining en dos muestras de valore: 50% para validación y 50% para test
+index_valid <- sample(index_remaining, round(0.50 * length(index_remaining)))
+
+# Conjunto de validación (25% del total de los datos del df_orig_resample)
+df_orig_valid <- df_orig_resample[index_valid, ]
+df_target_valid <- df_target[index_valid]
+
+# Conjunto de test (25% del total de los datos del df_orig_resample)
+df_orig_test <- df_orig_resample[setdiff(index_remaining, index_valid), ]
+df_target_test <- df_target[setdiff(index_remaining, index_valid)]
+
+```
+
+# ESTANDARIZACIÓN / NORMALIZACIÓN
+
+## Estandarización de las matrices de entrada a la red neuronal
+
+Se estandariza los conjuntos de datos train, valid y test de los datos de saturación en sangre.
+
+```{r 4. Estandarización de las matrices de entrada a la red neuronal}
+
+# Comienzo por estandarizar el conjunto de datos de validación:
+
+df_orig_valid = estandarizar (df_orig_train,df_orig_valid)
+
+# Continuo con la estandarización del conjunto de datos de test:
+
+df_orig_test = estandarizar (df_orig_train,df_orig_test)
+
+# Acabo con la estandarización del conjunto de datos de entrenamiento:
+
+df_orig_train = estandarizar (df_orig_train,df_orig_train)
+
+```
+
+# OPTIMIZACIÓN HIPERPARÁMETROS
+
+## Optimización de los hiperparámetros de la red
+
+Entrenamiento redes neuronales básicas tipo perceptrón multicapa, de una sola capa oculta.
+
+```{r 5. Optimización de los hiperparámetros de la red}
+
+#Defino los vectores referentes al número de neuronas de la capa oculta (Nhidden) y el parámetro de regularización (decay):
+
+Nhidden <- c(1, 2, 4, 6, 8, 10, 15, 20, 25, 30, 40, 50)
+decay <- c(0.0001, 0.001, 0.01, 0.1, 1, 10)
+
+n_rep = 5
+
+# mat_opt = optimizacion (df_orig_train,df_target_train,df_orig_valid,df_target_valid,Nhidden,decay,n_rep)
+# write.xlsx(mat_opt, "Solución_matriz_opt.xlsx", rowNames = TRUE)
+
+archivo <- "Y:/05. Formación/02_Master de Big Data/04_CURSO/05_EXÁMENES/03_EVALUACIONES 2024/14_Módulo 14/02_Sanidad/03_Resolución R/Solución_matriz_opt.xlsx"
+mat_opt <- as.matrix(read.xlsx(archivo, rowNames = TRUE))
+
+mat_opt %>% kbl(caption = "Resultados Accuracy") %>% kable_minimal()
+
+# Genero el gráfico de lineas y puntoz con todos los valores:
+
+# Creo la gráfica con matplot
+
+matplot(
+  Nhidden,
+  t(mat_opt),             # Transponer la matriz para que las columnas sean las series
+  type = "b",            # "b" para líneas y puntos
+  pch = 1:6,             # Diferentes símbolos para los puntos
+  col = rainbow(6),      # Asignar un color diferente para cada línea
+  lty = 1,               # Usar líneas sólidas
+  xlab = "Nhidden",       # Etiqueta del eje X
+  ylab = "Accuracy",              # Etiqueta del eje Y
+  main = "Métrica de rendimiento",
+  xaxt = "n"
+)
+
+# Agregar marcas personalizadas al eje X
+axis(1, at = Nhidden, labels = Nhidden)
+
+# Agregar leyenda
+legend(
+  "bottomright",            # Ubicación de la leyenda
+  legend = paste("decay =", decay),  # Etiquetas para las líneas
+  col = rainbow(6),      # Colores correspondientes
+  lty = 1,               # Tipo de línea en la leyenda
+  pch = 1:6,             # Tipo de puntos en la leyenda
+  bty = "n"              # Sin borde
+)
+
+# De gráfico obtengo que el accuracy maximizado se obtiene al ejecutar la red neuronal con los siguientes hiperparámetros:
+
+# Parámetro de regularización (decay) = 1
+# Número de neuronas en la capa oculta = 25
+
+```
+
+# TESTEO DEL MODELO
+
+## Entrenamiento y test de la red neuronal
+
+Para el entrenamiento y testeo del modelo, tomo los hiperparámetros tomados como óptimos en el apartado anterior.
+
+```{r 6. Entrenamiento y test de la red neuronal}
+
+Nhidden_opt <- 25
+decay_opt <- 1
+
+mat_conf_opt = train_test(df_orig_train,df_target_train,df_orig_test,df_target_test,Nhidden_opt,decay_opt)
+
+rownames(mat_conf_opt) <- c("Respiración normal (Real)", "Evento Respiratorio (Real)")
+colnames(mat_conf_opt) <- c("Respiración normal (Predicho)", "Evento Respiratorio (Predicho)")
+
+# Mostrar como tabla formateada la matriz de confusión.
+kable(mat_conf_opt, align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center") 
+
+# Paso ahora a las métricas típicas:
+
+# Crear una matriz con una fila y 5 columnas
+mat_met_tip <- matrix(numeric(5), nrow = 1)
+
+# Asignar nombres a las columnas
+nombres_col <- c("Se(%)", "Sp(%)", "PPV(%)", "NPV(%)", "Acc(%)")
+colnames(mat_met_tip) <- nombres_col
+
+# Calculamos en primer lugar la sensibildiad:
+
+mat_met_tip [1] = round (mat_conf_opt[1,1] * 100 / sum(mat_conf_opt[1,]),2)
+
+# Continuamos con la especificidad:
+
+mat_met_tip [2] = round(mat_conf_opt[2,2] * 100 / sum(mat_conf_opt[2,]),2)
+
+# Continuamos con el valor predictivo positivo:
+
+mat_met_tip [3] = round(mat_conf_opt[1,1] * 100 / sum(mat_conf_opt[,1]),2)
+
+# Continuamos con el valor predictivo negativo:
+
+mat_met_tip [4] = round(mat_conf_opt[2,2] * 100 / sum(mat_conf_opt[,2]),2)
+
+# Acabamos con el accuracy:
+
+mat_met_tip [5] = round(sum(diag(mat_conf_opt)) * 100 / sum(mat_conf_opt),2)
+
+
+mat_met_tip %>% kbl(caption = "Resultados métricas típeicas") %>% kable_minimal()
+
+```
+
+
+
+
+
+
+
